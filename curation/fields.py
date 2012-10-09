@@ -14,6 +14,34 @@ from .generic import GenericForeignKey
 from .models import ContentType
 from .widgets import SourceSelect
 
+def valid_choice(choices, value):
+    """
+    Loops through a set of choices, determining whether or not the value 
+    provided is going to 
+
+    @param choices: Set of choices to validate against.
+    @type  choices: (Key, Value) or [(Key1, Value1), ...]
+    
+    @param value: Value to check
+    @type  value: unicode
+
+    @return: Whether or not the value is valid
+    @rtype: Bool
+    """
+    
+    for k, v in self.choices:
+        if not isinstance(v, (list, tuple)):
+            v = [(k, v)]
+
+        # This is an optgroup, so look inside the group for options
+        for k2, _v2 in v:
+            if isinstance(k2, Mapping) and "value" in k2:
+                k2 = k2['value']
+
+            if value == smart_unicode(k2):
+                return True
+
+    return False
 
 class CuratedRelatedField(object):
     """
@@ -35,7 +63,23 @@ class CuratedRelatedField(object):
                             '%r and %r' % (cls.__name__, proxy_field, name))
         setattr(cls._meta, '_curated_proxy_field_name', name)
         setattr(cls._meta, '_curated_field_is_generic',
-            bool(getattr(self, 'ct_field', None) is not None))
+            getattr(self, 'ct_field', None) is not None)
+
+    ignore_props = frozenset(
+        ('DoesNotExist', 'MultipleObjectsReturned', '__doc__', '_meta', 
+         '__module__', '_base_manager', '_default_manager', 'objects')
+    )
+
+    def get_proxy_attrs(self, cls):
+        """
+        Returns the set of fields to allow proxying over from a provided
+        class.
+
+        @return: Set of fields to proxy
+        @rtype: set("field1", "field2", ...)
+        """
+        field_names = set(f.name for f in cls._meta.fields)
+        return field_names.union(set(cls.__dict__) - self.ignore_props)
 
     def contribute_to_instance(self, instance, related_cls):
         """
@@ -53,11 +97,7 @@ class CuratedRelatedField(object):
         current_proxy_model = instance.__dict__.get('_proxy_model', None)
         if current_proxy_model is related_cls:
             return
-        skips = ('DoesNotExist', 'MultipleObjectsReturned', '__doc__', '_meta',
-                 '__module__', '_base_manager', '_default_manager', 'objects',)
-        proxy_attrs = set([f.name for f in related_cls._meta.fields])
-        proxy_attrs = proxy_attrs.union([k for k in related_cls.__dict__ if k not in skips])
-        setattr(instance, '_proxy_attrs', proxy_attrs)
+        setattr(instance, '_proxy_attrs', self.get_proxy_attrs(related_cls))
         setattr(instance, '_proxy_model', related_cls)
 
     def contribute_to_related_class(self, cls, related):
@@ -76,12 +116,8 @@ class CuratedRelatedField(object):
         sup = super(CuratedRelatedField, self)
         if hasattr(sup, 'contribute_to_related_class'):
             sup.contribute_to_related_class(cls, related)
-        skips = ('DoesNotExist', 'MultipleObjectsReturned', '__doc__', '_meta',
-                 '__module__', '_base_manager', '_default_manager', 'objects',)
-        proxy_attrs = set([f.name for f in cls._meta.fields])
-        proxy_attrs = proxy_attrs.union([k for k in cls.__dict__ if k not in skips])
-        setattr(related.model._meta, '_proxy_attrs', proxy_attrs)
 
+        setattr(related.model._meta, '_proxy_attrs', self.get_proxy_attrs(cls))
 
 class CuratedForeignKey(CuratedRelatedField, ForeignKey):
     pass
@@ -103,7 +139,7 @@ class ContentTypeIdChoices(object):
 
     def __iter__(self):
         for ct_value, label, source_value in self.ct_choices:
-            yield (ct_value, label)
+            yield ct_value, label
 
 
 class SourceChoices(ContentTypeIdChoices):
@@ -121,7 +157,8 @@ class ContentTypeSourceChoices(object):
 
     # Sentinel value if a given choice in ct_choices is a 2-tuple and so does
     # not have a source_value
-    SOURCE_UNDEFINED = type('SOURCE_UNDEFINED', (object,), {})
+    SOURCE_UNDEFINED = object()
+    _cache = None
 
     error_msgs = {
         'num_items': textwrap.dedent(u"""
@@ -135,10 +172,11 @@ class ContentTypeSourceChoices(object):
         self.field = field
         self.ct_lookup = {}
         self.source_value_lookup = {}
-        self.ct_ids = set([])
-        self.source_values = set([])
-        self.error_msgs['num_items'] = self.error_msgs['num_items'].format(**{
-            'field_cls': self.field.__class__.__name__,})
+        self.ct_ids = set()
+        self.source_values = set()
+        self.error_msgs['num_items'] = self.error_msgs['num_items'].format(
+            field_cls = self.field.__class__.__name__
+        )
 
     def lookup_source_value(self, ct_id):
         """
@@ -147,29 +185,23 @@ class ContentTypeSourceChoices(object):
         if ct_id is None:
             return u""
 
-        try:
-            source_value, label = self.ct_lookup[ct_id]
-        except KeyError:
-            try:
-                if hasattr(self, '_cache'):
-                    # This means we've already iterated, no point doing it again
-                    raise
-                else:
-                    # Iterate through self to populate ct_lookup
-                    list(self)
-                    source_value, label = self.ct_lookup[ct_id]
-            except KeyError:
-                errors = {}
-                errors[self.field.name] = (
-                    u"Field %(field_name)s on %(app_label)s.%(model_name)s "
-                    u"does not have a ct_choice item with "
-                    u"ContentType.id=%(ct_id)d") % {
-                        'field_name': self.field.source_field_name,
-                        'app_label': self.field.model._meta.app_label,
-                        'model_name': self.field.model._meta.object_name,
-                        'ct_id': ct_id,}
-                raise exceptions.ValidationError(errors)
-        return source_value
+        if ct_id in self.ct_lookup:
+            return self.ct_lookup[ct_id][0]
+
+        if self._cache is None:
+            list(self) 
+            return self.lookup_source_value(ct_id)
+
+        errors = {}
+        errors[self.field.name] = (
+            u"Field %(field_name)s on %(app_label)s.%(model_name)s "
+            u"does not have a ct_choice item with "
+            u"ContentType.id=%(ct_id)d") % {
+                'field_name': self.field.source_field_name,
+                'app_label': self.field.model._meta.app_label,
+                'model_name': self.field.model._meta.object_name,
+                'ct_id': ct_id,}
+        raise exceptions.ValidationError(errors)
 
     def lookup_content_type(self, source_value):
         """
@@ -178,71 +210,53 @@ class ContentTypeSourceChoices(object):
         if source_value is None or force_unicode(source_value) is u"":
             return None
 
-        try:
-            ct_id, label = self.source_value_lookup[source_value]
-        except KeyError:
-            try:
-                if hasattr(self, '_cache'):
-                    # This means we've already iterated, no point doing it again
-                    raise
-                else:
-                    # Iterate through self to populate ct_lookup
-                    list(self)
-                    ct_id, label = self.source_value_lookup[source_value]
-            except KeyError:
-                errors = {}
-                errors[self.field.source_field_name] = (
-                    u"Field %(field_name)s on %(app_label)s.%(model_name)s "
-                    u"does not have a ct_choice item with "
-                    u"source_value=%(source_value)r ") % {
-                        'field_name': self.field.name,
-                        'app_label': self.field.model._meta.app_label,
-                        'model_name': self.field.model._meta.object_name,
-                        'source_value': source_value,}
-                raise exceptions.ValidationError(errors)
-        return ct_id
+        if source_value in self.source_value_lookup:
+            return self.source_value_lookup[source_value][0]
 
-    def __iter__(self):
-        try:
-            iter_cache = getattr(self, '_cache')
-        except AttributeError:
-            setattr(self, '_cache', [])
-        else:
-            for choice_item in iter_cache:
-                yield choice_item
-            raise StopIteration
+        if self._cache is None:
+            list(self)
+            return self.lookup_content_type(source_value)
 
+        errors = {}
+        errors[self.field.source_field_name] = (
+            u"Field %(field_name)s on %(app_label)s.%(model_name)s "
+            u"does not have a source_value item with "
+            u"source_value=%(source_value)r ") % {
+                'field_name': self.field.name,
+                'app_label': self.field.model._meta.app_label,
+                'model_name': self.field.model._meta.object_name,
+                'source_value': source_value,}
+        raise exceptions.ValidationError(errors)
+
+    def _process_choices(self):
         model_cls = getattr(self.field, 'model', None)
         for ct_choice in self.ct_choices:
-            # We use a dict for the option value so we can add extra attributes
-            ct_value = {'class': u'curated-content-type-option'}
-
-            # Grab relation and label from the first two items in the tuple
-            relation, label = ct_choice[0:2]
 
             # If ct_choice is a 3-tuple, get the third item as the source_value
-            if len(ct_choice) == 3:
-                source_value = ct_choice[2]
-            elif len(ct_choice) == 2:
-                source_value = self.SOURCE_UNDEFINED
+            # Otherwise, it's undefined
+            if len(ct_choice) in (2,3):
+                relation, label, source_value = (ct_choice + (self.SOURCE_UNDEFINED,))[:3]
             else:
                 raise exceptions.ImproperlyConfigured(self.error_msgs['num_items'])
 
             # Check that the length of this ct_choice item is consistent with
             # previous items
-            source_val_undefined = bool(source_value is self.SOURCE_UNDEFINED)
-            if not hasattr(self, 'source_val_undefined'):
-                setattr(self, 'source_val_undefined', source_val_undefined)
-            else:
+            try:
                 if source_val_undefined != self.source_val_undefined:
                     raise exceptions.ImproperlyConfigured(self.error_msgs['num_items'])
+            except AttributeError:
+                self.source_val_undefined = source_val_undefined
+
+            # We use a dict for the option value so we can add extra attributes
+            ct_value = {'class': u'curated-content-type-option'}
+            ct_id = None
 
             # Parse `relation` (the first item in the ct_choice tuple) into
             # app_label and model_name (or field_name, if 'self.something')
             try:
                 app_label, model_name = relation.split(".")
             except ValueError:
-                # If we can't split, assume a model in current app
+                # If we can't unpack the tuple, assume a model in current app
                 app_label = model_cls._meta.app_label
                 model_name = relation
             except AttributeError:
@@ -259,7 +273,6 @@ class ContentTypeSourceChoices(object):
                     try:
                         ct_id = ContentType.objects.get_for_model(model_cls).pk
                     except model_cls.DoesNotExist:
-                        # We haven't done a syncdb or migration yet
                         pass
 
             # If the relation isn't of the form 'self.field_name', grab the
@@ -273,23 +286,27 @@ class ContentTypeSourceChoices(object):
             if source_value is not self.SOURCE_UNDEFINED:
                 self.ct_lookup[ct_id] = (source_value, label)
                 self.source_value_lookup[source_value] = (ct_id, label)
-                choice_item = (ct_value, label, source_value)
+                yield ct_value, label, source_value
             else:
-                choice_item = (ct_value, label)
-            self._cache.append(choice_item)
-            yield choice_item
+                yield ct_value, label
+
+    def __iter__(self):
+        try:
+            return iter(self._cache)
+        except AttributeError:
+            self._cache = list(self._process_choices())
+            return iter(self._cache)
 
     def check_field_exists(self, field_name):
         """
         Register the association between this field and a field named in a
         ct_choices item with 'self.field_name'.
         """
-        model_cls = self.field.model
-        opts = model_cls._meta
+        opts = self.field.model._meta
         fields = opts.local_fields + opts.local_many_to_many + opts.virtual_fields
         try:
-            [f for f in fields if f.name == field_name][0]
-        except IndexError:
+            next(f for f in fields if f.name == field_name)
+        except StopIteration:
             raise FieldDoesNotExist("%s has no field named '%s'" % (
                 opts.object_name, field_name))
 
@@ -357,24 +374,17 @@ class ContentTypeIdDescriptor(object):
         # Check current value to prevent infinite loop between this descriptor
         # and ContentTypeSourceDescriptor
         try:
-            curr_value = instance.__dict__[self.field.attname]
+            if value == instance.__dict__[self.field.attname]: return
         except KeyError:
             pass
-        else:
-            if value == curr_value:
-                return
 
         instance.__dict__[self.field.attname] = value
+        instance._ctid_call_count = getattr(instance, '_ctid_call_count', 0) + 1
 
-        try:
-            setattr(instance, '_ctid_call_count', getattr(instance, '_ctid_call_count') + 1)
-        except AttributeError:
-            setattr(instance, '_ctid_call_count', 1)
-
+        # Dumb that python now distinguishes between int/longs
         if isinstance(value, (int, long)):
             value = ContentType.objects.get_for_id(value)
         self.__dict__['ct_descriptor'].__set__(instance, value)
-
 
 class SourceFieldDescriptor(object):
     """
@@ -393,31 +403,27 @@ class SourceFieldDescriptor(object):
 
     def __get__(self, instance, instance_type=None):
         if hasattr(self.field, '__get__'):
-            value = self.field.__get__(instance)
-            setattr(self, 'value', value)
+            self.value = self.field.__get__(instance)
         else:
-            try:
-                value = getattr(self, 'value')
-            except AttributeError:
-                setattr(self, 'value', None)
-                value = None
-        return value
+            self.value = None
+
+        return self.value
 
     def __set__(self, instance, value):
         if hasattr(self.field, '__set__'):
             self.field.__set__(instance, value)
             # Presumably the descriptor set the attname in the dict
-            value = instance.__dict__.get(self.field.attname)
-            setattr(self, 'value', value)
+            self.value = instance.__dict__.get(self.field.attname)
         else:
-            setattr(self, 'value', value)
-            instance.__dict__[self.field.attname] = value
+            self.value = instance.__dict__[self.field.attname] = value
 
+        # Did we save anything?  If not, carry on
         if self.ct_field.attname not in instance.__dict__:
             return
 
         # Set the associated content_type_id for this source value
         ct_id = self.ct_field.ct_choices.lookup_content_type(value)
+
         # Check the current value to avoid recursive calls
         if ct_id != instance.__dict__.get(self.ct_field.attname):
             setattr(instance, self.ct_field.attname, ct_id)
@@ -446,21 +452,7 @@ class ContentTypeChoiceField(forms.TypedChoiceField):
         Since we have store the choices values as dictionaries, we need
         to override this method to prevent a ValidationError
         """
-        for k, v in self.choices:
-            if isinstance(v, (list, tuple)):
-                # This is an optgroup, so look inside the group for options
-                for k2, v2 in v:
-                    if isinstance(k2, Mapping) and "value" in k2:
-                        k2 = k2["value"]
-                    if value == smart_unicode(k2):
-                        return True
-            else:
-                if isinstance(k, Mapping) and "value" in k:
-                    k = k["value"]
-                if value == smart_unicode(k):
-                    return True
-        return False
-
+        return valid_choice(self.choices, value)
 
 class ContentTypeSourceField(models.ForeignKey):
     """
@@ -495,15 +487,16 @@ class ContentTypeSourceField(models.ForeignKey):
     """
 
     ct_choices = None
+    fk_field = None
     source_field_name = None
     source_field = None
-    fk_field = None
 
     def __init__(self, *args, **kwargs):
         ct_choices = kwargs.pop('ct_choices', None)
         if ct_choices is not None:
             self.ct_choices = ContentTypeSourceChoices(ct_choices, self)
             kwargs['choices'] = ContentTypeIdChoices(self.ct_choices)
+
         self.source_field_name = kwargs.pop('source_field', None)
         super(ContentTypeSourceField, self).__init__(ContentType, *args, **kwargs)
 
@@ -519,13 +512,14 @@ class ContentTypeSourceField(models.ForeignKey):
             target = self.rel.to
         else:
             target = self.rel.to._meta.db_table
+
         cls._meta.duplicate_targets[self.column] = (target, "o2m")
 
         # Get source field, if the field name was passed in init, and set its
         # choices
         if self.source_field_name is not None:
             self.source_field = self.model._meta.get_field(self.source_field_name)
-            setattr(self.source_field, '_choices', SourceChoices(self.ct_choices))
+            self.source_field._choices = SourceChoices(self.ct_choices)
             # Add / Replace descriptor for the source field that auto-updates
             # the content-type field
             setattr(cls, self.source_field_name, SourceFieldDescriptor(self))
@@ -542,19 +536,9 @@ class ContentTypeSourceField(models.ForeignKey):
             # Skip validation for non-editable fields.
             return
         if self._choices and value:
-            for option_key, option_value in self.choices:
-                if isinstance(option_value, (list, tuple)):
-                    # This is an optgroup, so look inside the group for options.
-                    for optgroup_key, optgroup_value in option_value:
-                        if isinstance(optgroup_key, Mapping) and "value" in optgroup_key:
-                            optgroup_key = optgroup_key["value"]
-                        if value == optgroup_key:
-                            return
-                else:
-                    if isinstance(option_key, Mapping) and "value" in option_key:
-                        option_key = option_key["value"]
-                    if value == option_key:
-                        return
+            if valid_choice(self.choices, value):
+                return
+
             raise exceptions.ValidationError(
                 self.error_messages['invalid_choice'] % value)
 
@@ -583,11 +567,11 @@ class ContentTypeSourceField(models.ForeignKey):
         # Many of the subclass-specific formfield arguments (min_value,
         # max_value) don't apply for choice fields, so be sure to only pass
         # the values that TypedChoiceField will understand.
-        for k in kwargs.keys():
-            if k not in ('coerce', 'empty_value', 'choices', 'required',
-                         'widget', 'label', 'initial', 'help_text',
-                         'error_messages', 'show_hidden_initial'):
-                del kwargs[k]
+        good_kwargs = set('coerce', 'empty_value', 'choices', 'required',
+                          'widget', 'label', 'initial', 'help_text',
+                          'error_messages', 'show_hidden_initial')
+        for k in set(kwargs) - good_kwargs:
+            del kwargs[k]
 
         defaults.update(kwargs)
 
@@ -610,7 +594,6 @@ class ContentTypeSourceField(models.ForeignKey):
         form_class = ContentTypeChoiceField
 
         return form_class(**defaults)
-
 
 try:
     from south.modelsinspector import add_introspection_rules
