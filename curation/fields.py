@@ -29,7 +29,7 @@ def valid_choice(choices, value):
     @rtype: Bool
     """
     
-    for k, v in self.choices:
+    for k, v in choices:
         if not isinstance(v, (list, tuple)):
             v = [(k, v)]
 
@@ -241,6 +241,7 @@ class ContentTypeSourceChoices(object):
 
             # Check that the length of this ct_choice item is consistent with
             # previous items
+            source_val_undefined = source_value is self.SOURCE_UNDEFINED
             try:
                 if source_val_undefined != self.source_val_undefined:
                     raise exceptions.ImproperlyConfigured(self.error_msgs['num_items'])
