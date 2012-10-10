@@ -291,11 +291,9 @@ class ContentTypeSourceChoices(object):
                 yield ct_value, label
 
     def __iter__(self):
-        try:
-            return iter(self._cache)
-        except AttributeError:
+        if self._cache is None:
             self._cache = list(self._process_choices())
-            return iter(self._cache)
+        return iter(self._cache)
 
     def check_field_exists(self, field_name):
         """
