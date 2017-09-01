@@ -354,7 +354,7 @@ class ContentTypeSourceChoices(object):
                 opts.object_name, field_name))
 
 
-class ContentTypeSourceDescriptor(ReverseSingleRelatedObjectDescriptor):
+class ContentTypeSourceDescriptor(ForwardManyToOneDescriptor):
     """
     The descriptor for ContentTypeSourceField (the ForeignKey to ContentType)
 
