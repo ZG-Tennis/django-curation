@@ -12,7 +12,7 @@ else:
     get_model = apps.get_model
 from django.db.models.fields import FieldDoesNotExist
 from django.db.models.fields.related import ForeignKey
-from django.db.models.fields.related import ReverseSingleRelatedObjectDescriptor
+from django.db.models.fields.related_descriptors import ForwardManyToOneDescriptor
 from django import forms
 from django.utils.encoding import force_unicode, smart_unicode
 from django.utils.functional import cached_property, lazy
